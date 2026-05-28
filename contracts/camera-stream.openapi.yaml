@@ -1,0 +1,181 @@
+openapi: 3.1.0
+
+info:
+  title: Camera Stream Service Contract
+  version: 1.0.0
+  description: |
+    Contract cho Camera Stream service quản lý frame và hỗ trợ phân tích.
+  contact:
+    name: FIT4110 Teaching Team
+    email: fit4110@example.edu.vn
+
+servers:
+  - url: http://localhost:8000
+    description: Local server for Lab 04
+
+tags:
+  - name: health
+  - name: detection
+
+security:
+  - bearerAuth: []
+
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Kiểm tra trạng thái service
+      tags: [health]
+      security: []
+      responses:
+        '200':
+          description: Service đang hoạt động
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+
+  /detect:
+    post:
+      operationId: analyzeFrame
+      summary: Phân tích frame camera
+      tags: [detection]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnalyzeFrameRequest'
+      responses:
+        '202':
+          description: Phân tích thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DetectionResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /detections:
+    get:
+      operationId: listDetections
+      summary: Lấy danh sách kết quả nhận diện
+      tags: [detection]
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Danh sách detection
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DetectionPage'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        default: 20
+
+  schemas:
+    HealthStatus:
+      type: object
+      required: [status, service, time]
+      properties:
+        status: { type: string, enum: [ok] }
+        service: { type: string }
+        time: { type: string, format: date-time }
+
+    AnalyzeFrameRequest:
+      type: object
+      required: [cameraId, frameUrl, timestamp, requestId, analysisType]
+      properties:
+        cameraId: { type: string, pattern: '^CAM-[0-9]{2}$' }
+        frameUrl: { type: string, format: uri }
+        timestamp: { type: string, format: date-time }
+        requestId: { type: string }
+        analysisType: { type: string, enum: [PERSON_DETECTION, VEHICLE_DETECTION, INTRUSION_DETECTION] }
+
+    DetectionResult:
+      type: object
+      required: [detectionId, detectionType, confidence, cameraId, frameUrl, timestamp, detectedAt, trackingId, status, boundingBox]
+      properties:
+        detectionId: { type: string, format: uuid }
+        detectionType: { type: string, enum: [PERSON, VEHICLE, UNKNOWN_OBJECT] }
+        confidence: { type: number }
+        cameraId: { type: string }
+        frameUrl: { type: string }
+        timestamp: { type: string }
+        detectedAt: { type: string }
+        trackingId: { type: string, nullable: true }
+        status: { type: string, enum: [PROCESSING, COMPLETED, FAILED] }
+        boundingBox: { $ref: '#/components/schemas/BoundingBox' }
+
+    BoundingBox:
+      type: object
+      required: [x, y, width, height]
+      properties:
+        x: { type: integer }
+        y: { type: integer }
+        width: { type: integer }
+        height: { type: integer }
+
+    DetectionPage:
+      type: object
+      required: [items, nextCursor, hasMore]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/DetectionResult' }
+        nextCursor: { type: string, nullable: true }
+        hasMore: { type: boolean }
+
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string, nullable: true }
+        instance: { type: string, nullable: true }
+
+  responses:
+    BadRequest:
+      description: Bad Request
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    Unauthorized:
+      description: Unauthorized
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    NotFound:
+      description: Not Found
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    UnprocessableEntity:
+      description: Validation Error
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    InternalServerError:
+      description: Server Error
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }

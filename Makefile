@@ -1,5 +1,5 @@
-IMAGE_NAME ?= fit4110/iot-ingestion:lab04
-CONTAINER_NAME ?= fit4110-iot-lab04
+IMAGE_NAME ?= fit4110/camera-stream:lab04
+CONTAINER_NAME ?= fit4110-camera-lab04
 PORT ?= 8000
 
 install:
@@ -8,20 +8,11 @@ install:
 lint:
 	npm run lint:openapi
 
-mock:
-	npm run mock:iot
-
-test-mock:
-	npm run test:mock
-
 build:
 	docker build -t $(IMAGE_NAME) .
 
 run:
 	docker run --rm --name $(CONTAINER_NAME) -p $(PORT):8000 --env-file .env.example $(IMAGE_NAME)
-
-run-detached:
-	docker run -d --rm --name $(CONTAINER_NAME) -p $(PORT):8000 --env-file .env.example $(IMAGE_NAME)
 
 health:
 	curl http://localhost:$(PORT)/health

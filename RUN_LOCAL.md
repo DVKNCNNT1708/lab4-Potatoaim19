@@ -1,92 +1,65 @@
-# RUN_LOCAL.md – Hướng dẫn chạy Lab 04
+# RUN_LOCAL.md – Hướng dẫn chạy AI Vision Service (Lab 04)
 
-Tài liệu này giúp người khác clone repo sạch và chạy lại service trong Docker.
-
----
-
-## 1. Clone repo
-
-```bash
-git clone <repo-url>
-cd FIT4110_lab04_docker_packaging
-```
+Tài liệu này hướng dẫn cách đóng gói và chạy AI Vision service trong môi trường Docker.
 
 ---
 
-## 2. Cài dependencies cho Newman/Prism/Spectral
-
+## 1. Chuẩn bị
+- Đảm bảo đã cài đặt **Docker Desktop**.
+- Cài đặt dependencies (để chạy linter/test local):
 ```bash
 npm install
 ```
 
 ---
 
-## 3. Build Docker image
-
+## 2. Build Docker image
+Sử dụng Makefile để build image:
 ```bash
-docker build -t fit4110/iot-ingestion:lab04 .
+make build
+```
+Hoặc dùng lệnh Docker:
+```bash
+docker build -t fit4110/ai-vision:lab04 .
 ```
 
 ---
 
-## 4. Run container
-
+## 3. Chạy Container
+Khởi chạy service kèm theo file cấu hình môi trường:
 ```bash
-docker run --rm \
-  --name fit4110-iot-lab04 \
-  -p 8000:8000 \
-  --env-file .env.example \
-  fit4110/iot-ingestion:lab04
+make run
 ```
+Service sẽ lắng nghe tại cổng `8000`.
 
-Mở terminal khác, kiểm tra:
+---
 
+## 4. Kiểm tra hoạt động
+Kiểm tra Healthcheck endpoint:
 ```bash
 curl http://localhost:8000/health
 ```
-
-Kết quả mong đợi:
-
+**Kết quả mong đợi:**
 ```json
 {
   "status": "ok",
-  "service": "iot-ingestion",
-  "version": "0.4.0"
+  "service": "ai-vision-service",
+  "time": "2026-05-10T..."
 }
 ```
 
 ---
 
-## 5. Chạy Newman test trên container
-
+## 5. Chạy Automation Test (Newman)
+Sau khi container đã chạy, mở một terminal mới và chạy bộ test Postman:
 ```bash
-npm run test:local
-```
-
-Report sinh tại:
-
-```text
-reports/newman-lab04-local.xml
-reports/newman-lab04-local.html
-```
-
----
-
-## 6. Dừng container
-
-Nếu không dùng `--rm` hoặc container còn chạy:
-
-```bash
-docker stop fit4110-iot-lab04
-```
-
----
-
-## 7. Lệnh nhanh
-
-```bash
-make build
-make run
 make test-docker
+```
+Kết quả báo cáo (HTML/XML) sẽ được lưu trong thư mục `reports/`.
+
+---
+
+## 6. Dừng Service
+```bash
 make stop
 ```

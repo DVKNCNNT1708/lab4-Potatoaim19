@@ -1,265 +1,180 @@
 import os
+import uuid
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Dict, List, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+# Note: Root models use Pydantic V2
+from pydantic import BaseModel, Field, HttpUrl
 
 
-SERVICE_NAME = os.getenv("SERVICE_NAME", "iot-ingestion")
-SERVICE_VERSION = os.getenv("SERVICE_VERSION", "0.4.0")
+SERVICE_NAME = os.getenv("SERVICE_NAME", "camera-stream-service")
+SERVICE_VERSION = os.getenv("SERVICE_VERSION", "1.0.0")
 AUTH_TOKEN = os.getenv("AUTH_TOKEN", "local-dev-token")
 
 
 app = FastAPI(
-    title="FIT4110 Lab 04 - IoT Ingestion Service",
+    title="Camera Stream Service",
     version=SERVICE_VERSION,
-    description=(
-        "Dockerized IoT Ingestion API aligned with the Lab 03 OpenAPI/Postman contract."
-    ),
+    description="Service quản lý luồng camera và gửi dữ liệu phân tích, tuân thủ Contract Lab 03.",
 )
 
+# --- Models ---
 
-class SensorMetric(str, Enum):
-    temperature = "temperature"
-    humidity = "humidity"
-    motion = "motion"
-    smoke = "smoke"
+class AnalysisType(str, Enum):
+    PERSON_DETECTION = "PERSON_DETECTION"
+    VEHICLE_DETECTION = "VEHICLE_DETECTION"
+    INTRUSION_DETECTION = "INTRUSION_DETECTION"
 
+class DetectionType(str, Enum):
+    PERSON = "PERSON"
+    VEHICLE = "VEHICLE"
+    UNKNOWN_OBJECT = "UNKNOWN_OBJECT"
 
-class SensorUnit(str, Enum):
-    celsius = "celsius"
-    percent = "percent"
-    boolean = "boolean"
-    ppm = "ppm"
+class DetectionStatus(str, Enum):
+    PROCESSING = "PROCESSING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
 
+class BoundingBox(BaseModel):
+    x: int = Field(..., ge=0)
+    y: int = Field(..., ge=0)
+    width: int = Field(..., ge=1)
+    height: int = Field(..., ge=1)
 
-class ProblemDetails(BaseModel):
-    type: str = "about:blank"
-    title: str
-    status: int = Field(..., ge=400, le=599)
-    detail: str
-    instance: Optional[str] = None
-
-
-class HealthResponse(BaseModel):
-    status: str
+class HealthStatus(BaseModel):
+    status: str = "ok"
     service: str
-    version: str
+    time: str
 
+class AnalyzeFrameRequest(BaseModel):
+    cameraId: str = Field(..., pattern="^CAM-[0-9]{2}$")
+    frameUrl: HttpUrl
+    timestamp: datetime
+    requestId: str
+    analysisType: AnalysisType
 
-class SensorReadingCreate(BaseModel):
-    device_id: str = Field(..., min_length=3, examples=["ESP32-LAB-A01"])
-    metric: SensorMetric = Field(..., examples=["temperature"])
-    value: float = Field(
-        ...,
-        ge=-40,
-        le=80,
-        description="Boundary range used in Lab 03 and Lab 04: -40 to 80.",
-        examples=[31.5],
-    )
-    unit: Optional[SensorUnit] = Field(default=None, examples=["celsius"])
-    timestamp: str = Field(..., examples=["2026-05-13T08:30:00+07:00"])
-
-
-class SensorReading(BaseModel):
-    reading_id: str
-    device_id: str
-    metric: SensorMetric
-    value: float
-    unit: Optional[SensorUnit] = None
+class DetectionResult(BaseModel):
+    detectionId: uuid.UUID
+    detectionType: DetectionType
+    confidence: float = Field(..., ge=0, le=1)
+    cameraId: str
+    frameUrl: str
     timestamp: str
-    created_at: str
+    detectedAt: str
+    trackingId: Optional[str] = None
+    status: DetectionStatus
+    boundingBox: BoundingBox
 
+class DetectionPage(BaseModel):
+    items: List[DetectionResult]
+    nextCursor: Optional[str] = None
+    hasMore: bool = False
 
-class SensorReadingCreated(BaseModel):
-    reading_id: str
-    device_id: str
-    metric: SensorMetric
-    accepted: bool
-    created_at: str
+# --- In-memory Store ---
+DETECTIONS: List[DetectionResult] = []
 
-
-READINGS: List[Dict] = []
-
+# --- Helpers ---
 
 def build_problem(
-    *,
     status_code: int,
     title: str,
     detail: str,
-    instance: Optional[str] = None,
-    problem_type: str = "about:blank",
+    instance: str,
+    problem_type: str = "about:blank"
 ) -> Dict:
-    problem = {
+    return {
         "type": problem_type,
         "title": title,
         "status": status_code,
         "detail": detail,
+        "instance": instance,
     }
-    if instance:
-        problem["instance"] = instance
-    return problem
-
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
-    if isinstance(exc.detail, dict):
-        problem = exc.detail
-    else:
-        problem = build_problem(
-            status_code=exc.status_code,
-            title=status.HTTP_STATUS_CODES.get(exc.status_code, "HTTP Error"),
-            detail=str(exc.detail),
-            instance=str(request.url.path),
-        )
-
-    problem.setdefault("status", exc.status_code)
-    problem.setdefault("title", status.HTTP_STATUS_CODES.get(exc.status_code, "HTTP Error"))
-    problem.setdefault("type", "about:blank")
-    problem.setdefault("detail", "Request failed")
-    problem.setdefault("instance", str(request.url.path))
-
+    problem = exc.detail if isinstance(exc.detail, dict) else build_problem(
+        exc.status_code, "Error", str(exc.detail), request.url.path
+    )
     return JSONResponse(
         status_code=exc.status_code,
         content=problem,
-        media_type="application/problem+json",
-        headers=getattr(exc, "headers", None),
+        media_type="application/problem+json"
     )
 
-
 @app.exception_handler(RequestValidationError)
-async def validation_exception_handler(
-    request: Request, exc: RequestValidationError
-) -> JSONResponse:
-    first_error = exc.errors()[0] if exc.errors() else {}
-    location = ".".join(str(item) for item in first_error.get("loc", []))
-    message = first_error.get("msg", "Request validation error")
-    detail = f"{location}: {message}" if location else message
-
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         content=build_problem(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            title="Validation error",
-            detail=detail,
-            instance=str(request.url.path),
-            problem_type="https://smart-campus.local/problems/validation-error",
+            422,
+            "Validation Error",
+            str(exc.errors()),
+            request.url.path,
+            "https://campus.local/errors/validation"
         ),
-        media_type="application/problem+json",
+        media_type="application/problem+json"
     )
 
-
-def verify_bearer_token(authorization: Optional[str] = Header(default=None)) -> None:
-    if not authorization:
+def verify_token(authorization: Optional[str] = Header(None)):
+    if not authorization or authorization != f"Bearer {AUTH_TOKEN}":
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=build_problem(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                title="Unauthorized",
-                detail="Missing Authorization header",
-                problem_type="https://smart-campus.local/problems/unauthorized",
-            ),
+            status_code=401,
+            detail=build_problem(401, "Unauthorized", "Invalid or missing token", "/detect")
         )
 
-    expected = f"Bearer {AUTH_TOKEN}"
-    if authorization != expected:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=build_problem(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                title="Unauthorized",
-                detail="Invalid bearer token",
-                problem_type="https://smart-campus.local/problems/unauthorized",
-            ),
-        )
+# --- Endpoints ---
 
-
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def next_reading_id() -> str:
-    today = datetime.now(timezone.utc).strftime("%Y%m%d")
-    return f"R-{today}-{len(READINGS) + 1:04d}"
-
-
-@app.get("/health", response_model=HealthResponse)
-def health() -> HealthResponse:
-    return HealthResponse(
-        status="ok",
-        service=SERVICE_NAME,
-        version=SERVICE_VERSION,
-    )
-
-
-@app.post(
-    "/readings",
-    response_model=SensorReadingCreated,
-    status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(verify_bearer_token)],
-    responses={
-        401: {"model": ProblemDetails},
-        422: {"model": ProblemDetails},
-        429: {"model": ProblemDetails},
-    },
-)
-def create_reading(payload: SensorReadingCreate, response: Response) -> SensorReadingCreated:
-    if payload.metric == SensorMetric.temperature and payload.value >= 70:
-        response.headers["X-Warning"] = "high-temperature"
-
-    reading_id = next_reading_id()
-    created_at = now_iso()
-
-    item = {
-        "reading_id": reading_id,
-        "device_id": payload.device_id,
-        "metric": payload.metric.value,
-        "value": payload.value,
-        "unit": payload.unit.value if payload.unit else None,
-        "timestamp": payload.timestamp,
-        "created_at": created_at,
+@app.get("/health", response_model=HealthStatus)
+async def get_health():
+    return {
+        "status": "ok",
+        "service": SERVICE_NAME,
+        "time": datetime.now(timezone.utc).isoformat()
     }
-    READINGS.append(item)
 
-    return SensorReadingCreated(
-        reading_id=reading_id,
-        device_id=payload.device_id,
-        metric=payload.metric,
-        accepted=True,
-        created_at=created_at,
+@app.post("/detect", response_model=DetectionResult, status_code=202, dependencies=[Depends(verify_token)])
+async def analyze_frame(payload: AnalyzeFrameRequest):
+    # Mock logic: Camera Stream simulates sending a frame and getting a result
+    det_type = DetectionType.PERSON if payload.analysisType == AnalysisType.PERSON_DETECTION else DetectionType.VEHICLE
+
+    result = DetectionResult(
+        detectionId=uuid.uuid4(),
+        detectionType=det_type,
+        confidence=0.98,
+        cameraId=payload.cameraId,
+        frameUrl=str(payload.frameUrl),
+        timestamp=payload.timestamp.isoformat(),
+        detectedAt=datetime.now(timezone.utc).isoformat(),
+        trackingId=f"TRACK-{uuid.uuid4().hex[:6].upper()}",
+        status=DetectionStatus.COMPLETED,
+        boundingBox=BoundingBox(x=100, y=100, width=50, height=150)
     )
+    DETECTIONS.append(result)
+    return result
 
+@app.get("/detections", response_model=DetectionPage, dependencies=[Depends(verify_token)])
+async def list_detections(cursor: Optional[str] = None, limit: int = 20):
+    return DetectionPage(items=DETECTIONS[-limit:], nextCursor=None, hasMore=False)
 
-@app.get("/readings/latest", dependencies=[Depends(verify_bearer_token)])
-def latest_readings(
-    device_id: Optional[str] = Query(default=None),
-    limit: int = Query(default=10, ge=1, le=100),
-) -> Dict[str, List[Dict]]:
-    items = READINGS
+@app.get("/detections/recent", response_model=DetectionPage, dependencies=[Depends(verify_token)])
+async def get_recent_detections(limit: int = 20):
+    return DetectionPage(items=DETECTIONS[-limit:], nextCursor=None, hasMore=False)
 
-    if device_id:
-        items = [item for item in items if item["device_id"] == device_id]
-
-    return {"items": items[-limit:]}
-
-
-@app.get("/readings/{reading_id}", dependencies=[Depends(verify_bearer_token)])
-def get_reading(reading_id: str) -> Dict:
-    for item in READINGS:
-        if item["reading_id"] == reading_id:
-            return item
-
+@app.get("/detections/{detectionId}", response_model=DetectionResult, dependencies=[Depends(verify_token)])
+async def get_detection_by_id(detectionId: uuid.UUID):
+    for d in DETECTIONS:
+        if d.detectionId == detectionId:
+            return d
     raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
+        status_code=404,
         detail=build_problem(
-            status_code=status.HTTP_404_NOT_FOUND,
-            title="Not Found",
-            detail=f"Reading {reading_id} does not exist",
-            instance=f"/readings/{reading_id}",
-            problem_type="https://smart-campus.local/problems/not-found",
-        ),
+            404,
+            "Not Found",
+            f"Detection {detectionId} not found",
+            f"/detections/{detectionId}"
+        )
     )
